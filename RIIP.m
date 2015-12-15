@@ -41,12 +41,12 @@
 
 
 %todo:
-%I think there might be a problem with the relative beam center if the
+%- Do automatic detection of IP-position.
+%- I think there might be a problem with the relative beam center if the
 %long side of the image plate is turning downwards.
-%Error in the integration step for certain lengths of imageplates. This bug
+%- Error in the integration step for certain lengths of imageplates. This bug
 %is however difficult to reproduce
-%Automatic mask edges
-%
+
 
 %Fixed: 
 % width of imageplate is now update when users changes value of the
@@ -86,18 +86,22 @@ warning('off', 'MATLAB:imagesci:rtifc:notPhotoTransformed')
 %% Default settings
 default=[];
 % Instrument settings
-default.pixel_size=[24.941e-3/0.9926 24.941e-3];%mm
-default.camera_radius=1200.5; %mm
+%BL44b2
+default.pixel_size=[50e-3 50e-3];%mm
+default.camera_radius=286.48; %mm
+% AVID
+% default.pixel_size=[24.941e-3/0.9926 24.941e-3];%mm
+% default.camera_radius=1200.5; %mm
 default.conversion_factor=4.5;
 
 
 %Data file settings
 default.filename='';
-default.decay_constants='new'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
+default.decay_constants='none'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
 default.exposure_time=60;
 default.waiting_time=3.5;
 default.reading_time=3.9;
-default.scanner_correction='nanna'; %options: none, nanna, kasper
+default.scanner_correction='none'; %options: none, nanna, kasper
 default.rotate=[];
 
 
@@ -652,8 +656,8 @@ if isempty(RawFileName{1})
         'to high angle'],'-','OK','OK');
     for i=1:10
         %Open GUI to select the tif file (or dat)
-        [tempFileName,tempPathName] = uigetfile({'*.gel';'*.tif';'*.dat'},...
-            'Select Image Plate File (tif/gel/dat)');
+        [tempFileName,tempPathName] = uigetfile({'*.gel';'*.tif';'*.dat';'*.img'},...
+            'Select Image Plate File (tif/gel/dat/img)');
         
         % End script execution cleanly if the user press cancel
         if tempFileName == 0
@@ -696,6 +700,8 @@ for i=1:length(RawFileName)
             DataIP{i} = convert2floatingpoint(RawDataIP).^2/42948;
         case '.dat'
             DataIP{i} = load(RawFileName{i});
+        case '.img'
+            DataIP{i} = readimg(RawFileName{i});
         otherwise
             error('Fileformat not recognized')
     end
