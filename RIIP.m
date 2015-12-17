@@ -46,6 +46,9 @@
 %long side of the image plate is turning downwards.
 %- Error in the integration step for certain lengths of imageplates. This bug
 %is however difficult to reproduce
+%- Detect matlab version and warn that it is only fully compatible with
+%version 2015. Try to fix as many things to be compatible with 2012.
+%Currently optimop
 
 
 %Fixed: 
@@ -89,19 +92,25 @@ default=[];
 %BL44b2
 default.pixel_size=[50e-3 50e-3];%mm
 default.camera_radius=286.48; %mm
+default.scanner_correction='none'; %options: none, nanna, kasper
+default.decay_constants='none'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
+default.resolution_reduction=1;
 % AVID
 % default.pixel_size=[24.941e-3/0.9926 24.941e-3];%mm
 % default.camera_radius=1200.5; %mm
+% default.scanner_correction='nanna'; %options: none, nanna, kasper
+% default.decay_constants='new'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
+% default.resolution_reduction=5;
+
+
 default.conversion_factor=4.5;
 
 
 %Data file settings
 default.filename='';
-default.decay_constants='none'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
 default.exposure_time=60;
 default.waiting_time=3.5;
 default.reading_time=3.9;
-default.scanner_correction='none'; %options: none, nanna, kasper
 default.rotate=[];
 
 
@@ -109,8 +118,9 @@ default.beam_center_guess=[];
 
 %Image plate specific settings
 default.image_plate_borders=[];  
-default.image_plate_beam_center=[];  
 default.unwarp_image_plate='oneline'; %options: none, parallelogram, tetragon, twolines, onelines
+default.image_plate_beam_center=[];  
+
 default.mask_polygon=[];
 default.mask_inout=[];  
 
@@ -125,7 +135,7 @@ default.save_result='$';  %0: do not save,
                           %$: create output file name from data filename,
                               %any other string: save as that
 %Visual/info settings
-default.resolution_reduction=5;
+
 default.verbose=2;      %lower value means less information while running
 %0: no plots
 %1: mainly 1D plots
@@ -671,10 +681,17 @@ if isempty(RawFileName{1})
         RawFileName{i}=[tempPathName,tempFileName];   %#ok
         
         %user input scanner parameters
-        [t_exp, t_wait, t_read]=input_scanner_parameters(settings);
+        if ~strcmp(settings.decay_constants,'none')
+            [t_exp, t_wait, t_read]=input_scanner_parameters(settings);
+        else
+            %simply place filler values since no decay correction will be
+            %performed.
+            t_exp=1; t_wait=1; t_read=1;
+        end
         settings.exposure_time(i)=t_exp;
         settings.waiting_time(i) =t_wait;
         settings.reading_time(i)=t_read;
+        
         
         choice = questdlg('Load more data files?',...
             'Load more','yes','no','no');
@@ -2801,7 +2818,7 @@ set(ax_pix,'YDir','normal',...
 hold on
 %make an axis on top with 2theta angle
 ax_tth = axes('Parent',tab1,...
-    'Position',ax_pix.Position,...
+    'Position',get(ax_pix,'Position'),...
     'XAxisLocation','top',...
     'YAxisLocation','right',...
     'TickDir','out',...
@@ -2809,15 +2826,15 @@ ax_tth = axes('Parent',tab1,...
     'fontsize',12);
 set(ax_tth,'YTick',[])
 set(ax_tth,'YColor','w')
-set(ax_tth,'Xlim',pix2tth(ax_pix.XLim))
+set(ax_tth,'Xlim',pix2tth(get(ax_pix,'XLim')))
 
 axes(ax_pix); %make pixel-axis active
 
 %synchronize the pixel and 2theta axes.
 addlistener( ax_pix, 'XLim', 'PostSet', ...
-    @(src,evt) set(ax_tth,'XLim',pix2tth(ax_pix.XLim)) );
+    @(src,evt) set(ax_tth,'XLim',pix2tth(get(ax_pix,'XLim'))));
 addlistener( ax_pix, 'YLim', 'PostSet', ...
-    @(src,evt) set(ax_tth,'YLim',ax_pix.YLim));
+    @(src,evt) set(ax_tth,'YLim',get(ax_pix,'YLim')));
 
 %handle for curves to be plotted on top of data
 ttl=[];
@@ -2979,9 +2996,20 @@ disp('')
         xi=xi(:); zi=zi(:);
         
         p_lower=[p0(1)-1,p0(2)-500]; p_upper=[p0(1)+2,p0(2)+500];
-        options=optimoptions('lsqcurvefit','TolX',1e-9);
-        [p_fit,resnorm,resid,~,~,~,J]=lsqcurvefit(z_pix_circle,p0,xi,zi,...
-                                                  p_lower,p_upper,options);
+        
+        
+        if verLessThan('matlab','8.3')
+            % -- Code to run in MATLAB R2013a and earlier here --
+            [p_fit,resnorm,resid,~,~,~,J]=lsqcurvefit(z_pix_circle,p0,xi,zi,...
+                p_lower,p_upper);
+        else
+            % -- Code to run in MATLAB R2013b and later here --
+            options=optimoptions('lsqcurvefit','TolX',1e-9);
+            [p_fit,resnorm,resid,~,~,~,J]=lsqcurvefit(z_pix_circle,p0,xi,zi,...
+                p_lower,p_upper,options);
+        end
+
+
         p_conf = nlparci(p_fit,resid,'jacobian',J);
         degrees_of_freedom=length(zi)-length(p0)-1;   %CHECK LATER is it correct
         esd=conf2esd(p_conf,degrees_of_freedom);
