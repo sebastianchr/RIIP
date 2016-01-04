@@ -16,6 +16,9 @@ info.latitude=str2double(fgetl(fid_INF));    %10
 info.date_and_time1=fgetl(fid_INF);                  %11
 info.date_and_time2=fgetl(fid_INF);                  %12
 info.over_flow_pixels=str2double(fgetl(fid_INF));    %13
+if isnan(info.over_flow_pixels) %Empty string is interpreted as NaN, but means 0
+    info.over_flow_pixels=0;
+end
 fclose(fid_INF);
 
 end
