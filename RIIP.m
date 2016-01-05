@@ -1,5 +1,5 @@
 % function RIIP(varargin)
-%Description: 
+%Description:
 %Author: S. Christensen, Aarhus University (2015)
 %Last edit: 10/11/2015 - 13:00
 %How to use:
@@ -35,9 +35,15 @@
 %-mask certain number of pixels long strip along the edges
 %08/12/15
 %-implement different pixelsizes in X and Z-direction. NEEDS CHECKING
-%especially for debye cone 
-% - implemented difference in pixelsize in integration weighting 
+%especially for debye cone
+% - implemented difference in pixelsize in integration weighting
 % (by length and area)
+%28/12/2015
+%- Fixed error in esd calculation (variance instead of standard deviation)
+%- implemented choice of esd calculation method. Choose between "empirical"
+%or "poisson".
+%04/01/2016
+%- Added backward compatibility with the older keywords. 
 
 
 %todo:
@@ -46,18 +52,10 @@
 %long side of the image plate is turning downwards.
 %- Error in the integration step for certain lengths of imageplates. This bug
 %is however difficult to reproduce
-%- Detect matlab version and warn that it is only fully compatible with
+%- Detect matlab version and warn that it is not fully compatible with
 %version 2015. Try to fix as many things to be compatible with 2012.
-%Currently optimop
 
 
-%Fixed: 
-% width of imageplate is now update when users changes value of the
-% belonging field
-% Fixed proplems reading 'line' and 'rectangle' from configuration file 
-% In IP-select: the selected borders (blue polygon) was incorrectly read
-% from the positions of the points instead of the red polygon.
-% re-added the 2theta axis to the post-integration 2d-analysis
 
 
 function RIIP(varargin)
@@ -65,7 +63,7 @@ if nargin ==0
     % No input is given. The program enters interactive mode where most
     % settings can be set interactively.
     interactive_mode=2 ;
-    % set 'interactive_mode' to 2 for all options and to 1 for limited 
+    % set 'interactive_mode' to 2 for all options and to 1 for limited
     % options
 elseif nargin==1
     %Settings are read from a configuration file
@@ -74,7 +72,7 @@ elseif nargin==1
     % If an essential setting is not contained in the configuration file
     % and no default value exist then the user is prompted for input
 else
-    % The settings can also be input directly into the function 
+    % The settings can also be input directly into the function
     settings0=struct(varargin{:});
     interactive_mode=0;
 end
@@ -86,54 +84,57 @@ scrsz = get(0,'ScreenSize');
 %should check if this has any consequences
 warning('off', 'MATLAB:imagesci:rtifc:notPhotoTransformed')
 
+
 %% Default settings
 default=[];
 % Instrument settings
 %BL44b2
-default.pixel_size=[50e-3 50e-3];%mm
-default.camera_radius=286.48; %mm
-default.scanner_correction='none'; %options: none, nanna, kasper
-default.decay_constants='none'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
-default.resolution_reduction=1;
+% default.pixel_size=[50e-3 50e-3];%mm
+% default.camera_radius=286.48; %mm
+% default.scanner_correction='none'; %options: none, nanna, kasper
+% default.decay_correction='none'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
+% default.resolution_reduction=1;
 % AVID
-% default.pixel_size=[24.941e-3/0.9926 24.941e-3];%mm
-% default.camera_radius=1200.5; %mm
-% default.scanner_correction='nanna'; %options: none, nanna, kasper
-% default.decay_constants='new'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
-% default.resolution_reduction=5;
+default.pixel_size=[24.941e-3/0.994 24.941e-3];%mm
+default.camera_radius=1200.5; %mm
+default.scanner_correction='nanna'; %options: none, nanna, kasper
+default.decay_correction='new'; %options: none, new, old, (a0 t1 t2) In the last option the user provides the numeric paramters for a double exponential decay t1 and t2 are in minutes.
+default.resolution_reduction=5;
 
 
 default.conversion_factor=4.5;
 
 
 %Data file settings
-default.filename='';
-default.exposure_time=60;
-default.waiting_time=3.5;
-default.reading_time=3.9;
-default.rotate=[];
+default.scan_filename='';
+default.scan_exposure_time=60;
+default.scan_waiting_time=3.5;
+default.scan_reading_time=3.9;
+default.scan_rotate=[];
 
 
 default.beam_center_guess=[];
 
 %Image plate specific settings
-default.image_plate_borders=[];  
-default.unwarp_image_plate='oneline'; %options: none, parallelogram, tetragon, twolines, onelines
-default.image_plate_beam_center=[];  
+default.ip_borders=[];
+default.ip_beam_center=[];
 
 default.mask_polygon=[];
-default.mask_inout=[];  
+default.mask_type=[];
+
+default.unwarp_image_plate='oneline'; %options: none, parallelogram, tetragon, twolines, onelines
+
 
 % Integration settings
-default.path_shape='debye_cone';  %options: line, circle, debye_cone
-default.weighting_method='area';  %options: unity, length, area
-
+default.integration_path='debye_cone';  %options: line, circle, debye_cone
+default.integration_weighting='area';  %options: unity, length, area
+default.integration_esd='empirical'; %poisson or empirical
 
 %Save-settings
 default.save_settings= [];
 default.save_result='$';  %0: do not save,
-                          %$: create output file name from data filename,
-                              %any other string: save as that
+%$: create output file name from data filename,
+%any other string: save as that
 %Visual/info settings
 
 default.verbose=2;      %lower value means less information while running
@@ -145,7 +146,7 @@ default.verbose=2;      %lower value means less information while running
 if interactive_mode>0;
     %launch user interface
     settings=default;
-    settings.filename='';
+    settings.scan_filename='';
     settings.save_result='';
     settings.save_settings='';
     
@@ -164,35 +165,66 @@ if interactive_mode>0;
 else
     % As standard the default values are used
     settings=default;
-    % If a parameter is defined in the settings-file (as loaded into 
+    % If a parameter is defined in the settings-file (as loaded into
     % settings0), then this value is used instead
     if (isfield(settings0,'pixel_size'));            settings.pixel_size=settings0.pixel_size;  end  %in mm
     if (isfield(settings0,'camera_radius'));         settings.camera_radius=settings0.camera_radius;  end  %in mm
     if (isfield(settings0,'conversion_factor'));     settings.conversion_factor=settings0.conversion_factor;  end
-    if (isfield(settings0,'image_plate_borders'));   settings.image_plate_borders=settings0.image_plate_borders;   end
-    if (isfield(settings0,'image_plate_beam_center'));settings.image_plate_beam_center=settings0.image_plate_beam_center;   end
-    if (isfield(settings0,'rotate'));                settings.rotate=settings0.rotate;   end
+    if (isfield(settings0,'ip_borders'));   settings.ip_borders=settings0.ip_borders;   end
+    if (isfield(settings0,'ip_beam_center'));settings.ip_beam_center=settings0.ip_beam_center;   end
     if (isfield(settings0,'resolution_reduction'));  settings.resolution_reduction=settings0.resolution_reduction;   end
-    if (isfield(settings0,'path_shape'));            settings.path_shape=settings0.path_shape;   end
-    if (isfield(settings0,'weighting_method'));      settings.weighting_method=settings0.weighting_method;   end
-    if (isfield(settings0,'filename'));              settings.filename=settings0.filename;  end
+    if (isfield(settings0,'integration_path'));            settings.integration_path=settings0.integration_path;   end
+    if (isfield(settings0,'integration_weighting'));      settings.integration_weighting=settings0.integration_weighting;   end
+    if (isfield(settings0,'integration_esd'));      settings.integration_esd=settings0.integration_esd;   end
     if (isfield(settings0,'beam_center_guess'));     settings.beam_center_guess=settings0.beam_center_guess;   end
     if (isfield(settings0,'mask_polygon'));          settings.mask_polygon=settings0.mask_polygon;  end
-    if (isfield(settings0,'mask_inout'));            settings.mask_inout=settings0.mask_inout;  end
-    if (isfield(settings0,'decay_constants'));       settings.decay_constants=settings0.decay_constants;  end
-    if (isfield(settings0,'exposure_time'));         settings.exposure_time=settings0.exposure_time;  end
-    if (isfield(settings0,'waiting_time'));          settings.waiting_time=settings0.waiting_time;  end
-    if (isfield(settings0,'reading_time'));          settings.reading_time=settings0.reading_time;  end
+    if (isfield(settings0,'mask_type'));            settings.mask_type=settings0.mask_type;  end
+    if (isfield(settings0,'decay_correction'));       settings.decay_correction=settings0.decay_correction;  end
+    if (isfield(settings0,'scan_filename'));              settings.scan_filename=settings0.scan_filename;  end
+    if (isfield(settings0,'scan_rotate'));                settings.scan_rotate=settings0.scan_rotate;   end
+    if (isfield(settings0,'scan_exposure_time'));         settings.scan_exposure_time=settings0.scan_exposure_time;  end
+    if (isfield(settings0,'scan_waiting_time'));          settings.scan_waiting_time=settings0.scan_waiting_time;  end
+    if (isfield(settings0,'scan_reading_time'));          settings.scan_reading_time=settings0.scan_reading_time;  end
     if (isfield(settings0,'scanner_correction'));    settings.scanner_correction=settings0.scanner_correction;  end
     if (isfield(settings0,'unwarp_image_plate'));    settings.unwarp_image_plate=settings0.unwarp_image_plate;  end
     if (isfield(settings0,'save_settings'));         settings.save_settings=settings0.save_settings;  end
     if (isfield(settings0,'save_result'));           settings.save_result=settings0.save_result;  end
     if (isfield(settings0,'verbose'));               settings.verbose=settings0.verbose;  end
+    
+    
+    %check for older keywords. If any deprecated keywords are found all the
+    %settings are saved to the configuration file
+    force_update_settings=false; 
+    if (isfield(settings0,'path_shape'));            settings.integration_path=settings0.path_shape;        force_update_settings=true; end
+    if (isfield(settings0,'weighting_method'));      settings.integration_weighting=settings0.weighting_method;    force_update_settings=true; end
+    if (isfield(settings0,'decay_constants'));       settings.decay_correction=settings0.decay_constants;   force_update_settings=true; end
+    if (isfield(settings0,'mask_inout'));            settings.mask_type=settings0.mask_inout;               force_update_settings=true; end
+        if (isfield(settings0,'rotate'));                settings.scan_rotate=settings0.rotate;             force_update_settings=true; end
+    if (isfield(settings0,'filename'));              settings.scan_filename=settings0.filename;             force_update_settings=true; end
+    if (isfield(settings0,'exposure_time'));         settings.scan_exposure_time=settings0.exposure_time;   force_update_settings=true; end
+    if (isfield(settings0,'waiting_time'));          settings.scan_waiting_time=settings0.waiting_time;     force_update_settings=true; end
+    if (isfield(settings0,'reading_time'));          settings.scan_reading_time=settings0.reading_time;     force_update_settings=true; end
+    if (isfield(settings0,'image_plate_borders'));   settings.ip_borders=settings0.image_plate_borders;     force_update_settings=true; end
+    if (isfield(settings0,'image_plate_beam_center'));settings.ip_beam_center=settings0.image_plate_beam_center;   force_update_settings=true; end
+    
+    % update the settings file to have the correct keywords
+    if force_update_settings && nargin==1
+        struct2ascii(settings,varargin{1});
+    end
+        
+end
 
+
+
+%check version and warn if older than 2015
+if verLessThan('matlab','8.5')
+    questdlg(['You are using a MATLAB version older than R2015a.'...
+        ' Somethings might not work as intended '],'Version check',...
+        'OK','OK');
 end
 
 standard_colors=[0 0 1; 0 0.5 0; 1 0 0 ; 0 0.75 0.75; ...
-                 0.75 0 0.75; 0.75 0.75 0 ; 0.25 0.25 0.25];
+    0.75 0 0.75; 0.75 0.75 0 ; 0.25 0.25 0.25];
 
 %i: refers to data file
 %j: refers to imageplate of datafile i
@@ -202,7 +234,8 @@ precision = 'single';
 verbose =settings.verbose;
 dfs=scrsz(3:4)*0.70;
 if numel(settings.pixel_size)==1
-    pixsize=repmat(settings.pixel_size,1,2);
+    settings.pixel_size=repmat(settings.pixel_size,1,2);
+    pixsize=settings.pixel_size;
 elseif numel(settings.pixel_size)==2
     pixsize=settings.pixel_size;
 else
@@ -213,14 +246,14 @@ resred=settings.resolution_reduction;
 
 %ensure that certain settings are in a cell-array if there is only a single
 %value;
-if ischar(settings.filename)
-    temp={}; temp{1}=settings.filename;
-    settings.filename=temp;
+if ischar(settings.scan_filename)
+    temp={}; temp{1}=settings.scan_filename;
+    settings.scan_filename=temp;
 end
 
 
 
-%% Read raw data. 
+%% Read raw data.
 % Data is a cell-array. Each entry is a saparate data file as
 % scanned by the scanner. Settings is updated to contain the filenames of
 % data files if these are manually selected by the user during the call of
@@ -231,7 +264,7 @@ if verbose >0
     fprintf('Starting to load data\n')
 end
 [data, settings]=read_raw_data(settings);
-number_of_data_files=length(settings.filename);
+number_of_data_files=length(settings.scan_filename);
 
 if verbose >0
     fprintf('Finished loading data\n')
@@ -245,33 +278,33 @@ end
 %Decay correction. Corrects for the decay of the imageplate while scanning
 data=correct_for_decay(data,settings);
 
-%Correct the scanner position. The position recorded by the scanner is 
-% slightly incorrect in the Z-direction. THe position error-appear to be 
-% stable between scans. Therefore the Z-axis is corrected. Data array 
-% returned below is interpolated to correspond to the true Z-position 
+%Correct the scanner position. The position recorded by the scanner is
+% slightly incorrect in the Z-direction. THe position error-appear to be
+% stable between scans. Therefore the Z-axis is corrected. Data array
+% returned below is interpolated to correspond to the true Z-position
 if ~strcmpi(settings.scanner_correction,'none')
     for i=1:number_of_data_files
         data{i}=correct_scanner_position(data{i},...
-                                  settings.scanner_correction);
+            settings.scanner_correction);
     end
 end
 
 %% Rotate the data
 % Scanned IP must be oriented so that lowest 2theta corresponds to low
-% Z-pixel-value. If not the case the data can be rotated in the 
-% for each data file, an entry in settings.rotate indicate if data should be
-% left as-is (=0) or rotated counter-clockwise by 90*settings.rotate(i)
+% Z-pixel-value. If not the case the data can be rotated in the
+% for each data file, an entry in settings.scan_rotate indicate if data should be
+% left as-is (=0) or rotated counter-clockwise by 90*settings.scan_rotate(i)
 % degrees
 
-if ~isempty(settings.rotate)
-     %change the orientation of the raw data
-     if length(settings.rotate)>=number_of_data_files
-         for i=1:number_of_data_files
-             data{i}=rot90(data{i},settings.rotate(i));
-         end
-     else
-         error('Keyword ''rotate'' not defined for all scans')
-     end
+if ~isempty(settings.scan_rotate)
+    %change the orientation of the raw data
+    if length(settings.scan_rotate)>=number_of_data_files
+        for i=1:number_of_data_files
+            data{i}=rot90(data{i},settings.scan_rotate(i));
+        end
+    else
+        error('Keyword ''scan_rotate'' not defined for all scans')
+    end
 end
 
 if verbose >0
@@ -280,29 +313,29 @@ end
 
 %% Determine the position of image plates
 % The position of each IP is defined by 4 points.
-% if the positions are not defined in  settings.image_plate_borders then a
-% userinterface is launched. 
+% if the positions are not defined in  settings.ip_borders then a
+% userinterface is launched.
 ip_positions=cell(number_of_data_files,1);
 data_ip=cell(number_of_data_files,1);
 number_of_image_plates=zeros(number_of_data_files,1);
 ip_borders_cut=cell(number_of_data_files,1);
 ip_length=cell(number_of_data_files,1);
 
-if isempty(settings.image_plate_borders)
+if isempty(settings.ip_borders)
     %The user selects the position of imageplates graphically. This is
     %important to do accurately since this is used to define the coordinate
     %system for the integration.
     for i=1:number_of_data_files
-        [data{i}, ip_positions{i},settings.rotate(i)]=define_image_plate_graphic(data{i},settings);
+        [data{i}, ip_positions{i},settings.scan_rotate(i)]=define_image_plate_graphic(data{i},settings);
         %image plates must be selected in the order from low angle to high
         %angle. This cannot be changed later
     end
-    settings.image_plate_borders=ip_positions;
+    settings.ip_borders=ip_positions;
 end
 
 %count number of image plates pr data file
 for i=1:number_of_data_files
-    number_of_image_plates(i)=length(settings.image_plate_borders{i});
+    number_of_image_plates(i)=length(settings.ip_borders{i});
 end
 % Check that image plates have been selected before continuing or throw an
 % error. Only the first datafile is checked, since it must contain at least
@@ -317,13 +350,13 @@ for i=1:number_of_data_files
     ip_length{i}=zeros(number_of_image_plates(i),1);
     for j=1:number_of_image_plates(i)
         [~, ip_length{i}(j,1)]=get_ip_origin_and_length(...
-            settings.image_plate_borders{i}{j});
+            settings.ip_borders{i}{j});
     end
 end
 
 
 %% Optimize IP-borders
-% At this point, I could make a function to optimice the image plate 
+% At this point, I could make a function to optimice the image plate
 % borders
 
 %% Cut out individual image plates
@@ -331,7 +364,7 @@ end
 % containing only a single image_plate
 for i=1:number_of_data_files
     [data_ip{i}, ip_borders_cut{i}]=cut_raw_data(data{i}, ...
-        settings.image_plate_borders{i});
+        settings.ip_borders{i});
     % data_ip is nested cell-array. 1st level refers to each raw-data-file.
     % The second layer contains all the separate image plates for each data
     % file.
@@ -339,11 +372,11 @@ end
 clear data %clean up to save memory
 %% Unwarp the recorded image plate
 % If the image plate was misaligned in the scanner, this function can rotate
-% the image plate so it aligned with the integration coordinate system. 
+% the image plate so it aligned with the integration coordinate system.
 if ~strcmpi(settings.unwarp_image_plate,'none')
     for i=1:number_of_data_files
         for j=1:number_of_image_plates(i)
-%           also output unwarped ip_borders
+            %           also output unwarped ip_borders
             [data_ip{i}{j}, ip_borders_cut{i}{j}]= ...
                 transform_to_rectangular_grid(data_ip{i}{j}, ...
                 ip_borders_cut{i}{j},settings.unwarp_image_plate);
@@ -353,14 +386,14 @@ end
 
 %% Find the center of the beam
 %If data files and image plates have been selcted in the correct order,
-%the beam center should always be in the first data file and on the first 
+%the beam center should always be in the first data file and on the first
 %image plate.
 i_bc=1; j_bc=1;
 
 %checks if a guess (or refined value) for the beam center has been defined.
 %if not the user will be asked to select the position of the beam center
 
-bc_ip=settings.image_plate_beam_center;
+bc_ip=settings.ip_beam_center;
 if isempty(bc_ip)
     try
         bc_guess=settings.beam_center_guess;
@@ -390,11 +423,11 @@ else
     end
 end
 
-settings.image_plate_beam_center=bc_ip;
+settings.ip_beam_center=bc_ip;
 
 %% Mask the data
-% First the masks are a number of polygons (mask_polygon) and a value 
-% (mask_inout). The later dictates whether the data inside or outside the
+% First the masks are a number of polygons (mask_polygon) and a value
+% (mask_type). The later dictates whether the data inside or outside the
 % polygon is kept. These polygons are converted into an actual mask of same
 % dimensions as data_ip{i}{j}. It is an array of 1 and 0 where 1 denotes
 % that a particular pixel should be kept.
@@ -408,7 +441,7 @@ if isempty(settings.mask_polygon)
     inout    =cell(number_of_data_files,1);
     mask     =cell(number_of_data_files,1);
     if interactive_mode==1
-       for i=1:number_of_data_files
+        for i=1:number_of_data_files
             for j=1:number_of_image_plates(i)
                 %user graphically selects the desired masks.
                 mask{i}{j}=ones(size(data_ip{i}{j}));
@@ -425,7 +458,7 @@ if isempty(settings.mask_polygon)
         end
     end
     settings.mask_polygon=mask_poly;
-    settings.mask_inout=inout;
+    settings.mask_type=inout;
 else
     %     If the coordinates for mask-polygons are given in the input-files,
     %     will these be converted into the actual mask with same
@@ -435,7 +468,7 @@ else
     for i=1:number_of_data_files
         mask{i}=cell(number_of_image_plates(i),1);
         for j=1:number_of_image_plates(i)
-            mask{i}{j}=define_mask_from_polygons(data_ip{i}{j},settings.mask_polygon{i}{j},settings.mask_inout{i}{j});
+            mask{i}{j}=define_mask_from_polygons(data_ip{i}{j},settings.mask_polygon{i}{j},settings.mask_type{i}{j});
         end
     end
 end
@@ -447,7 +480,21 @@ save_settings_to_file(settings,true)
 % The 2D data is integrated to produce a 1D diffraction pattern for each
 % image plate. The resulting 1D-patterns are normalized to the integration
 % path, and the scanner correction is applied to the pixel-positions.
-integrated_data=integrate_data(data_ip,mask,settings);
+integrated_data=cell(number_of_data_files,1);
+for i=1:number_of_data_files
+    integrated_data{i}=cell(number_of_image_plates(i),1);
+    for j=1:number_of_image_plates
+        integrated_data{i}{j}=integrate_data(data_ip{i}{j},...
+            mask{i}{j},...
+            settings.ip_beam_center{i}(j,:),...
+            settings);
+        if verbose > 1
+            int_masked=data_ip{i}{j};
+            int_masked(mask{i}{j}==0)=0;
+            plot_and_analyse_2d(int_masked,settings, i,j);
+        end
+    end
+end
 % "integrated_data" is a nested cell-array containing a file and
 % image-plate level
 
@@ -486,16 +533,16 @@ if verbose > 0
     xlabel('2\theta [degree]')
     ylabel('Integrated intensity [photons]')
     set(gca,'fontsize',16)
-
+    
     
     h1 = uibuttongroup('visible','on','units','pixels',...
-    'Position',[5 5 230 40]);
-h11 = uicontrol('Position',[10 10 100 20],...
-    'parent',h1,'String','Save data',...
-    'Callback',@(src,evt) save_integrated_data(integrated_data,settings,false)); %#ok
-h12 = uicontrol('Position',[120 10 100 20],...
-    'parent',h1,'String','Save settings',...
-    'Callback',@(src,evt) save_settings_to_file(settings,false)); %#ok
+        'Position',[5 5 230 40]);
+    h11 = uicontrol('Position',[10 10 100 20],...
+        'parent',h1,'String','Save data',...
+        'Callback',@(src,evt) save_integrated_data(integrated_data,settings,false)); %#ok
+    h12 = uicontrol('Position',[120 10 100 20],...
+        'parent',h1,'String','Save settings',...
+        'Callback',@(src,evt) save_settings_to_file(settings,false)); %#ok
     
     
 end
@@ -510,7 +557,7 @@ end  %This concludes the main program
 
 %% Sub functions
 %Below are the sub-functions defined.
-%% Settings userselection 
+%% Settings userselection
 function settings=input_instrument_parameters(settings)
 %Get instrument settings. If more than one data-file has been loaded, these
 % parameters are assumed to the equal for all of them.
@@ -560,7 +607,7 @@ str_code = {'debye_cone','circle','line'};
     'ListString',str,...
     'Listsize',[160 80]);
 if v
-    settings.path_shape=str_code{s};
+    settings.integration_path=str_code{s};
 else
     error('Did not choose a shape for integration path')
 end
@@ -572,7 +619,7 @@ str_code = str;
     'ListString',str,...
     'Listsize',[160 80]);
 if v
-    settings.weighting_method=str_code{s};
+    settings.integration_weighting=str_code{s};
 else
     error('Did not choose a shape for border')
 end
@@ -616,19 +663,19 @@ else
 end
 end
 
-function [exposure_time, ...
-    waiting_time, ...
-    reading_time]=input_scanner_parameters(default)
-% Provide integration parameters for decay-correction. 
+function [scan_exposure_time, ...
+    scan_waiting_time, ...
+    scan_reading_time]=input_scanner_parameters(default)
+% Provide integration parameters for decay-correction.
 % A set of these parameters must be inputed for each data-file.
 
 prompt = {'Enter exposure time (min)',...
     'Enter waiting time (min)',...
     'Enter reading time (min)'};
 
-defaultanswer = {num2str(default.exposure_time),...
-                 num2str(default.waiting_time),...
-                 num2str(default.reading_time)};
+defaultanswer = {num2str(default.scan_exposure_time),...
+    num2str(default.scan_waiting_time),...
+    num2str(default.scan_reading_time)};
 
 options=struct('Resize','on','WindowStyle','normal');
 
@@ -642,23 +689,23 @@ for ii = 1:length(answer)
     answer{ii} = str2double(answer{ii});
 end
 
-exposure_time=answer{1};
-waiting_time=answer{2};
-reading_time=answer{3};
+scan_exposure_time=answer{1};
+scan_waiting_time=answer{2};
+scan_reading_time=answer{3};
 
 end
 
-%% Read data from file 
+%% Read data from file
 function [DataIP, settings]=read_raw_data(settings)
-% Load the raw 2D data. If no filenames are contained in settings.filename
+% Load the raw 2D data. If no filenames are contained in settings.scan_filename
 % the user will be prompted to select the desired files. Multiple files can
 % be selected. The files must be selected in order of low to high angle.
 % For each loaded file the user is prompted to input scanning time
 % parameters.
-% If the filenames are defined in settings.filename, the user is not prompted
+% If the scan_filenames are defined in settings.scan_filename, the user is not prompted
 % it is assumed that scanner parameters have been defined correctly. If not
 % it will give an error somewhere else. FIXLATER.
-RawFileName=settings.filename;
+RawFileName=settings.scan_filename;
 global verbose
 if isempty(RawFileName{1})
     RawFileName={};
@@ -681,16 +728,16 @@ if isempty(RawFileName{1})
         RawFileName{i}=[tempPathName,tempFileName];   %#ok
         
         %user input scanner parameters
-        if ~strcmp(settings.decay_constants,'none')
+        if ~strcmp(settings.decay_correction,'none')
             [t_exp, t_wait, t_read]=input_scanner_parameters(settings);
         else
             %simply place filler values since no decay correction will be
             %performed.
             t_exp=1; t_wait=1; t_read=1;
         end
-        settings.exposure_time(i)=t_exp;
-        settings.waiting_time(i) =t_wait;
-        settings.reading_time(i)=t_read;
+        settings.scan_exposure_time(i)=t_exp;
+        settings.scan_waiting_time(i) =t_wait;
+        settings.scan_reading_time(i)=t_read;
         
         
         choice = questdlg('Load more data files?',...
@@ -701,7 +748,7 @@ if isempty(RawFileName{1})
     end
     
 end
-settings.filename=RawFileName;
+settings.scan_filename=RawFileName;
 DataIP=cell(1,length(RawFileName));
 for i=1:length(RawFileName)
     [~,~,file_format] = fileparts(RawFileName{i});
@@ -710,7 +757,7 @@ for i=1:length(RawFileName)
             % Open the selected file
             %         RawDataInfo = imfinfo(RawFileName) ;
             
-            RawDataIP = imread(RawFileName{i});  
+            RawDataIP = imread(RawFileName{i});
             DataIP{i} = (convert2floatingpoint(RawDataIP)+0.5)*(2^16-1)/42948;
         case '.gel'
             RawDataIP = imread(RawFileName{i});
@@ -722,6 +769,9 @@ for i=1:length(RawFileName)
         otherwise
             error('Fileformat not recognized')
     end
+    
+    %convert to photon counts using the supplied conversion factor
+    DataIP{i}=DataIP{i}*settings.conversion_factor;
 end
 end
 
@@ -732,8 +782,8 @@ global verbose
 number_of_data_files=length(int);
 % Set the constants for the decay function which defines the expected
 % intensity decay as function of time.
-if ischar(settings.decay_constants)
-    switch settings.decay_constants
+if ischar(settings.decay_correction)
+    switch settings.decay_correction
         case 'old'
             a0=0.36;
             t1=14.9; t2=434; %[min]
@@ -744,15 +794,15 @@ if ischar(settings.decay_constants)
             a0=1;
             t1=inf; t2=inf; %[min]
         otherwise
-            error('Unknown string in ''decay_constants''')
+            error('Unknown string in ''decay_correction''')
     end
-elseif isnumeric(settings.decay_constants)
-    decay_par=settings.decay_constants;
+elseif isnumeric(settings.decay_correction)
+    decay_par=settings.decay_correction;
     a0=decay_par(1);
     t1=decay_par(2);
     t2=decay_par(3);
 else
-    error('In decay correction: unknown type for "decay_constants"')
+    error('In decay correction: unknown type for "decay_correction"')
 end
 %the decay function as an
 decay = @(t) a0.*exp(-t./t1)+(1-a0).*exp(-t./t2);
@@ -764,11 +814,11 @@ if verbose >2
 end
 for i=1:number_of_data_files
     %     convert the z-axis coordinates into a time scale
-    tstart=settings.exposure_time(i)/2+...
-        settings.waiting_time(i);
-    tend=settings.exposure_time(i)/2+...
-        settings.waiting_time(i)+...
-        settings.reading_time(i); %time from start expoure to end development
+    tstart=settings.scan_exposure_time(i)/2+...
+        settings.scan_waiting_time(i);
+    tend=settings.scan_exposure_time(i)/2+...
+        settings.scan_waiting_time(i)+...
+        settings.scan_reading_time(i); %time from start expoure to end development
     t=linspace(tstart,tend,size(int{i},2));
     
     int{i}=int{i}./repmat(decay(t),size(int{i},1),1);
@@ -787,7 +837,7 @@ function data_cor=correct_scanner_position(data,correction_function)
 switch correction_function
     case 'nanna'
         pp1=load([ getpath '/spline_s3_px24k941.mat']);
-        x_rec2true=  @(x) x; %#ok % from true value to recorded value    
+        x_rec2true=  @(x) x; %#ok % from true value to recorded value
         z_rec2true=  @(z) z-ppval(pp1,z);
         % this is approximate at best since the true recorded value should
         % go into ppval
@@ -824,15 +874,15 @@ switch method
         end
         data_cor=convert2floatingpoint(data_cor);
     case 2
-                x_true=(1:nx)';  z_true=(1:nz)';
-                x_rec=x_true2rec(x_true);
-                z_rec=z_true2rec(z_true);
-                [Z_rec, X_rec]=meshgrid(z_rec,x_rec);
-                data_cor=convert2floatingpoint(interp2(data,Z_rec,X_rec));
-% This method is not qute accurate but for 2D interpolation it is much, 
-% much faster because the grid is regular. The two methods give almos 
-% identical results
-                
+        x_true=(1:nx)';  z_true=(1:nz)';
+        x_rec=x_true2rec(x_true);
+        z_rec=z_true2rec(z_true);
+        [Z_rec, X_rec]=meshgrid(z_rec,x_rec);
+        data_cor=convert2floatingpoint(interp2(data,Z_rec,X_rec));
+        % This method is not qute accurate but for 2D interpolation it is much,
+        % much faster because the grid is regular. The two methods give almos
+        % identical results
+        
 end
 
     function path = getpath()
@@ -851,7 +901,7 @@ global dfs
 % number refers to their handle in variable h. The <,>,^,v indicate the
 % directions the points can be dragged, i.e. 1,2,3,4,6,8 moves in the
 % direction of the lines 4-3 and 1-2. The entire figure can be rotated
-% around 4 by holding down "Alt" and draggind 2 or 3. 
+% around 4 by holding down "Alt" and draggind 2 or 3.
 %                 ^
 % <4>-------------7------------ <3> (Alt-> rotate)
 %  |              v             /
@@ -1001,13 +1051,13 @@ uiwait(fig2d)
             x_initial=[x0 x0 x0+xw x0+xw]';
             
             %ensure that the rectangle is within the data-area
-            x_initial(x_initial<x_limit(1))=x_limit(1); 
+            x_initial(x_initial<x_limit(1))=x_limit(1);
             x_initial(x_initial>x_limit(2))=x_limit(2);
-            z_initial(z_initial<z_limit(1))=z_limit(1); 
+            z_initial(z_initial<z_limit(1))=z_limit(1);
             z_initial(z_initial>z_limit(2))=z_limit(2);
             
             % Plot a rectangle which the user can edit by dragging
-%             [h, p_tetragon] =ui_tetragon([z_initial, x_initial]);
+            %             [h, p_tetragon] =ui_tetragon([z_initial, x_initial]);
             [h, p_trapez] =ui_trapez([z_initial, x_initial]);
             is_ui_trapez_drawn=true; %used by "finish" to check
             %if an unfinished polygon is drawn
@@ -1068,7 +1118,7 @@ uiwait(fig2d)
         width_new=str2double(get(obj,'String'));
         
         width_old=distance_between_two_parallel_line(xy1(1,:),xy1(4,:),...
-                                                    xy1(1,:)-xy1(2,:));
+            xy1(1,:)-xy1(2,:));
         move_dir=xy1(1,:)-xy1(4,:);
         move=(width_new-width_old)*move_dir/norm(move_dir);
         
@@ -1141,23 +1191,23 @@ uiwait(fig2d)
         setColor(h(2),'red');
         setColor(h(4),'black');
         setColor(h(3),'red');
-
+        
         
         %Add call back to every point
         %Corners
-        addNewPositionCallback(h(1),@(p) move_h1); 
-        addNewPositionCallback(h(2),@(p) move_h2); 
-        addNewPositionCallback(h(3),@(p) move_h3); 
-        addNewPositionCallback(h(4),@(p) move_h4); 
+        addNewPositionCallback(h(1),@(p) move_h1);
+        addNewPositionCallback(h(2),@(p) move_h2);
+        addNewPositionCallback(h(3),@(p) move_h3);
+        addNewPositionCallback(h(4),@(p) move_h4);
         %lines - midpoints
-        addNewPositionCallback(h(5),@(p) move_h5); 
-        addNewPositionCallback(h(7),@(p) move_h7); 
+        addNewPositionCallback(h(5),@(p) move_h5);
+        addNewPositionCallback(h(7),@(p) move_h7);
         addNewPositionCallback(h(6),@(p) move_h6);
         addNewPositionCallback(h(8),@(p) move_h8);
-
+        
         
         %Now follows the individual callbacks for all points. Each callbac
-        %defines how the trapez is moved. 
+        %defines how the trapez is moved.
         function move_h1
             xy_old=xy1;
             xy_new=h(1).getPosition;
@@ -1169,7 +1219,7 @@ uiwait(fig2d)
             update_mid_position;
             h(1).setPosition(xy1(1,:))
             h(5).setPosition(xy1(5,:))
-            h(8).setPosition(xy1(8,:))   
+            h(8).setPosition(xy1(8,:))
             draw_tetragon;
         end
         function move_h2
@@ -1255,7 +1305,7 @@ uiwait(fig2d)
                 
             end
             draw_tetragon;
-        end       
+        end
         function move_h4
             modifiers = get(gcf,'currentModifier');
             altIsPressed = ismember('alt',modifiers);
@@ -1275,7 +1325,7 @@ uiwait(fig2d)
                 xy_old=xy1;
                 xy_new=h(4).getPosition;
                 d=xy_new-xy_old(4,:);
-               
+                
                 xy1=xy_old+repmat(d,8,1);
                 
                 update_mid_position;
@@ -1288,7 +1338,7 @@ uiwait(fig2d)
                 h(6).setPosition(xy1(6,:))
                 h(7).setPosition(xy1(7,:))
                 h(8).setPosition(xy1(8,:))
-            end  
+            end
             draw_tetragon;
         end
         function move_h5
@@ -1332,7 +1382,7 @@ uiwait(fig2d)
             d=xy_new-xy_old(7,:);
             
             d_proj=r2*dot(r2,d);
-
+            
             xy1(3,:)=xy_old(3,:)+d_proj;
             xy1(4,:)=xy_old(4,:)+d_proj;
             
@@ -1359,7 +1409,7 @@ uiwait(fig2d)
             h(5).setPosition(xy1(5,:))
             h(7).setPosition(xy1(7,:))
             
-            draw_tetragon;  
+            draw_tetragon;
         end
         
         function update_mid_position()
@@ -1382,11 +1432,11 @@ uiwait(fig2d)
             
             xy_shape=[xy1(1:4,:); xy1(1,:)];
             set(poly_plot,'XData',xy_shape(:,1),'YData',xy_shape(:,2))
-
+            
             ip_length=sqrt(sum((xy1(2,:)-xy1(1,:)).^2));
             set(h13,'string',num2str(round(ip_length)));
             ip_width=distance_between_two_parallel_line(xy1(1,:),xy1(4,:),...
-                                                    xy1(1,:)-xy1(2,:));
+                xy1(1,:)-xy1(2,:));
             set(h15,'string',num2str(round(ip_width)));
         end
         
@@ -1401,9 +1451,9 @@ uiwait(fig2d)
         function A=rotation_matrix(phi)
             A=[cosd(phi) -sind(phi);sind(phi) cosd(phi)];
         end
-%         function xi=cyclic(xi,n)
-%             xi=mod(xi-1,n)+1;
-%         end
+        %         function xi=cyclic(xi,n)
+        %             xi=mod(xi-1,n)+1;
+        %         end
     end
 
 end
@@ -1513,7 +1563,7 @@ switch unwarp_shape
         r4o=[-r4(2), r4(1),];
         r_vert=(r2o+r4o)/2;
         r_vert=r_vert/norm(r_vert);
-       
+        
         %intersection between vertical lines and top horizontal lines
         [~, xz0proj]=vector_lines_intersect(xz0,r2,xz1,r_vert);
         [~, xz1proj]=vector_lines_intersect(xz1,r4,xz0,r_vert);
@@ -1575,7 +1625,7 @@ switch unwarp_shape
         r3n=r3/xm;
         
         [Z_new,X_new]=meshgrid(z_new,x_new);
-
+        
         x_new2old= @(x,z) x.*(r1n(1).*(1-z/zm)+r3n(1).*z/zm)+...
             z.* r2n(1)+...
             xz0(1);
@@ -1587,7 +1637,7 @@ switch unwarp_shape
         
         
     case {'oneline', 'onelines'}
-        %only the direction of top horizontal line is used to unwarp the 
+        %only the direction of top horizontal line is used to unwarp the
         %IP. Same as above if the two "horizontal" lines are parallel
         r_vert=[-r4(2), r4(1),];
         
@@ -1676,11 +1726,11 @@ switch unwarp_shape
 end
 
 if ~exist('borders_new','var')
-disp(['The IP-border coordinates has not been transformed to the new'...
-    ' coordinate system. Maybe it has not been implemented for the '...
-    'selected unwarp method. The IP-borders are only used for the '...
-    'optional initial mask']);
-borders_new=borders;
+    disp(['The IP-border coordinates has not been transformed to the new'...
+        ' coordinate system. Maybe it has not been implemented for the '...
+        'selected unwarp method. The IP-borders are only used for the '...
+        'optional initial mask']);
+    borders_new=borders;
 end
 
 % interp2 assumes that the default grid points cover the rectangular
@@ -1691,7 +1741,7 @@ data_new=interp2(data,Z_new_in_old,X_new_in_old,'linear',0);
 end
 
 %% Define mask
-function [mask_poly, mask_inout, mask_2d]=define_mask(data,borders,settings)
+function [mask_poly, mask_type, mask_2d]=define_mask(data,borders,settings)
 %User interface to mask the image plates before integration.
 global dfs
 
@@ -1699,31 +1749,31 @@ current_number=0; %used for undo/redo feature
 
 %The masks are defined by these variables
 mask_poly={};  %dim [n_masks, 1]
-mask_inout=[]; %dim [n_masks, 1]
+mask_type=[]; %dim [n_masks, 1]
 mask=[];       %dim [n_masks, 1]
 mask_plot=[];
 nx=size(data,1); nz=size(data,2);
 temp_obj=[];
 if isempty(borders)
-borders=[1 1; 1 nz;nx nz;nx 1];
+    borders=[1 1; 1 nz;nx nz;nx 1];
 end
 
 fig_mask = figure('PaperUnits',get(0,'defaultfigurePaperUnits'),...
-                  'Name','Mask image plate',...
-                  'NumberTitle','off',...
-                  'Position',[50 50 dfs], ...
-                  'Visible','on',...
-                  'menubar','none',...
-                  'toolbar','figure');
+    'Name','Mask image plate',...
+    'NumberTitle','off',...
+    'Position',[50 50 dfs], ...
+    'Visible','on',...
+    'menubar','none',...
+    'toolbar','figure');
 
 ax_mask = axes('Parent',fig_mask,...
-               'units','normalized',...
-               'position',[0.1 0.18 0.85 0.77 ]);
+    'units','normalized',...
+    'position',[0.1 0.18 0.85 0.77 ]);
 
 % Create the button group,
 h1 = uibuttongroup('visible','on', ...
-                   'units','pixels', ...
-                   'Position',[5 20 215 40]);
+    'units','pixels', ...
+    'Position',[5 20 215 40]);
 % which contains 4 buttons:
 % Finish: Press this button when all masks have been drawn.
 % Undo: Undo the previous mask
@@ -1834,8 +1884,8 @@ imagesc_highspeed(log10(data),...
     settings.resolution_reduction,...
     'Parent',ax_mask);
 set(ax_mask,'YDir','normal');
-        xlabel('Z-direction (pixels)')
-        ylabel('X-direction (pixels)')
+xlabel('Z-direction (pixels)')
+ylabel('X-direction (pixels)')
 hold on
 clim_values=get(ax_mask,'Clim');
 set(h_clim_min,'string',num2str(clim_values(1)));
@@ -1853,11 +1903,11 @@ waitfor(fig_mask,'Userdata','finished')
 if current_number > 0
     mask_poly=mask_poly(1:current_number);
     mask=mask(:,:,1:current_number);
-    mask_inout=mask_inout(1:current_number);
+    mask_type=mask_type(1:current_number);
 else % if no masks have been made, make a dummy unity mask.
     mask=ones(size(data));
     mask_poly=[];
-    mask_inout=1;
+    mask_type=1;
 end
 
 
@@ -1894,9 +1944,9 @@ close(fig_mask);
         end
         if output_file_name~=0
             if current_number > 0
-            mask2d=single(prod(mask(:,:,current_number),3)); %#ok
+                mask2d=single(prod(mask(:,:,current_number),3)); %#ok
             else % if no masks have been made, make a dummy unity mask.
-            mask2d=ones(size(data)); %#ok
+                mask2d=ones(size(data)); %#ok
             end
             save(output_file_name,'mask2d')
         end
@@ -2120,14 +2170,14 @@ close(fig_mask);
         mask_type=string2inout(get(get(h2,'SelectedObject'),'string'));
         draw_poly_mask(poly,mask_type);
         set(h3, 'userdata',false);  %callbackrunning
-
+        
     end
 
     function draw_poly_mask(poly0,mask_type0)
         if current_number>0
-        mn=current_number+1;
+            mn=current_number+1;
         else %number 1 is reserved for the edge mask
-            mn=2; 
+            mn=2;
         end
         
         %save all information about the created mask in the common
@@ -2136,17 +2186,17 @@ close(fig_mask);
         mask_plot(mn)=fill_inout(poly0(:,2),poly0(:,1),mask_type0);
         mask(:,:,mn)=(poly2mask(poly0(:,2),poly0(:,1), nx, nz)==mask_type0);
         mask_poly{mn}=poly0;
-        mask_inout(mn)=mask_type0;
+        mask_type(mn)=mask_type0;
         current_number=mn;
     end
 
     function draw_edge_mask(poly0)
         %Hides the previous edge mask
-     try
-         delete(mask_plot(1))
-     catch
-         %do nothing
-     end
+        try
+            delete(mask_plot(1))
+        catch
+            %do nothing
+        end
         mn=1;
         
         %save all information about the created mask in the common
@@ -2155,14 +2205,15 @@ close(fig_mask);
         mask_plot(mn)=fill_inout(poly0(:,2),poly0(:,1),1);
         mask(:,:,mn)=(poly2mask(poly0(:,2),poly0(:,1), nx, nz)==1);
         mask_poly{mn}=poly0;
-        mask_inout(mn)=1;
+        mask_type(mn)=1;
         current_number=mn;
     end
 
     function p=fill_inout(x,y,in_or_outside)
-        % Colours outside the polygon (defined by [x,y]) it 
-        % in_or_outside=1, i.e. keep mask. Colours inside the polygon if 
-        % in_or_outside ~=1, i.e. remove mask
+        % Fill in- or outside.
+        % Colours outside the polygon (defined by [x,y]) if
+        % in_or_outside=1, i.e. "keep mask". Colours inside the polygon if
+        % in_or_outside ~=1, i.e. "remove mask"
         if in_or_outside
             %Color the area outside the polygon
             [~, i]=min(x);
@@ -2279,7 +2330,7 @@ function p=imagesc_highspeed(varargin)
 % downsampling the plotted image
 if isa(varargin{1},'matlab.graphics.primitive.Image')
     p=varargin{1};
-    varargin=varargin(2:end);   
+    varargin=varargin(2:end);
 else
     p=0;
 end
@@ -2317,11 +2368,11 @@ else
         p=imagesc(z_axis,x_axis,hs_data);
     end
     
-%     if length(varargin)>2
-%         set(p,'cdata',hs_data,varargin{3:end});
-%     else
-%         set(p,'Cdata',hs_data);
-%     end
+    %     if length(varargin)>2
+    %         set(p,'cdata',hs_data,varargin{3:end});
+    %     else
+    %         set(p,'Cdata',hs_data);
+    %     end
 end
 
 end
@@ -2333,14 +2384,14 @@ global dfs resred
 %center position with a mouse-click. The coordinates can also be input into
 %the 2 editable fields.
 fig_2d=figure('Outerposition',[ 0  50   dfs], ...
-              'Name','Find beam center',...
-              'NumberTitle','off',...
-              'menubar','none',...
-              'toolbar','figure');
+    'Name','Find beam center',...
+    'NumberTitle','off',...
+    'menubar','none',...
+    'toolbar','figure');
 
 ax_2d   =axes('Parent',fig_2d,...
-              'units','normalized',...
-              'position',[0.1 0.19 0.85 0.77 ]);
+    'units','normalized',...
+    'position',[0.1 0.19 0.85 0.77 ]);
 
 imagesc_highspeed(log10(data),resred,'parent',ax_2d);
 set(ax_2d,'YDir','normal');
@@ -2349,38 +2400,38 @@ ylabel('X-direction (pixels)')
 
 
 h=uibuttongroup('visible','on',...
-              'units','pixels',...
-              'Position',[5 5 350 50]);
+    'units','pixels',...
+    'Position',[5 5 350 50]);
 
 input_z=uicontrol('parent',h,...
-              'Style', 'edit',...
-              'String', '',...
-              'Position', [120 10 80 20]);
+    'Style', 'edit',...
+    'String', '',...
+    'Position', [120 10 80 20]);
 input_x=uicontrol('parent',h,...
-              'Style', 'edit',...
-              'String', '',...
-              'Position', [210 10 80 20]);
+    'Style', 'edit',...
+    'String', '',...
+    'Position', [210 10 80 20]);
 text_z=uicontrol('parent',h,...
-              'Style', 'text',...
-              'String', 'Z',...
-              'Position', [120 30 80 15]); %#ok
+    'Style', 'text',...
+    'String', 'Z',...
+    'Position', [120 30 80 15]); %#ok
 text_x=uicontrol('parent',h,...
-              'Style', 'text',...
-              'String', 'X',...
-              'Position', [210 30 80 15]); %#ok
+    'Style', 'text',...
+    'String', 'X',...
+    'Position', [210 30 80 15]); %#ok
 select_button=uicontrol('parent',h,...
-              'Style', 'pushbutton',...
-              'String', 'Select with mouse',...
-              'Position', [10 10 100 20],...
-              'Callback',@select_with_mouse_callback); %#ok
+    'Style', 'pushbutton',...
+    'String', 'Select with mouse',...
+    'Position', [10 10 100 20],...
+    'Callback',@select_with_mouse_callback); %#ok
 ok_button=uicontrol('parent',h,...
-              'Style', 'pushbutton',...
-              'String', 'OK',...
-              'Position', [300 10 40 20],...
-              'Callback',@finish); %#ok
+    'Style', 'pushbutton',...
+    'String', 'OK',...
+    'Position', [300 10 40 20],...
+    'Callback',@finish); %#ok
 
 %waits here until the OK-button is pressed
-uiwait(fig_2d) 
+uiwait(fig_2d)
 
 z_ui =str2double(get(input_z,'string'));
 x_ui =str2double(get(input_x,'string'));
@@ -2397,12 +2448,12 @@ close(fig_2d);
     end
 
     function finish(~,~)
-       if isempty(get(input_z,'string')) || isempty(get(input_x,'string'))
-           %ignore the push on OK button because a beam center has not been
-           %selected
-       else
-           uiresume(gcbf)
-       end
+        if isempty(get(input_z,'string')) || isempty(get(input_x,'string'))
+            %ignore the push on OK button because a beam center has not been
+            %selected
+        else
+            uiresume(gcbf)
+        end
     end
 
 end
@@ -2528,222 +2579,182 @@ end
 end
 
 %% Integrate image plate
-function int_data=integrate_data(int,mask,settings)
-global verbose pixsize
-% bring commandwindow to the front so the user sees that integration 
+function int_data=integrate_data(int,mask,ip_bc,settings)
+%This function uses "coordinate_transformations", "get_curve_func"
+% bring commandwindow to the front so the user sees that integration
 % has started
 commandwindow;
 
-number_of_data_files=length(int);
-int_data=cell(number_of_data_files,1);
+verbose=settings.verbose;
+pixsize=settings.pixel_size;        
 
-for i=1:number_of_data_files
-    number_of_image_plates=length(int{i});
-    int_data{i}=cell(number_of_image_plates,1);
-    
-    for j=1:number_of_image_plates
-        
-        %relative beam center of this imageplate
-        ip_bc=settings.image_plate_beam_center{i}(j,:);
-        %coordination transformations
-        [pix2tth, tth2pix, tth2mm, ...
-         x_pix2mm, x_mm2pix, ...
-         z_pix2mm, z_mm2pix ]=coordinate_transformations(ip_bc);  %#ok
-        
-        %The integration path as function of x and 2theta
-        curve_func=get_curve_func(ip_bc,settings.path_shape);
-        
-        %setup the 2theta axis
-        tth_step=pix2tth(2)-pix2tth(1);
-        minz=1;
-        tth_min=pix2tth(minz);
-        if tth_min<0.01
-            tth_min=pix2tth(ceil(tth2pix(0.01))); %FIXLATER
-        end
-        tth_max=pix2tth(size(int{i}{j},2));
-        tth_values=tth_min:tth_step:tth_max;
-        
-        nx=size(int{i}{j},1);
-        x=1:nx;
-        
-        %initiate variables for integrated result
-        int_mean=zeros(size(tth_values));
-        int_esd=zeros(size(tth_values));
-        
-        if verbose > 0
-            fprintf('Starting curve integration\n')
-        end
-        integration_method='block_interp2';
-        switch integration_method
-            case 'block_interp2'
-                block_size=1000;
-                dx=1;
-                x_sampling=(x(1):dx:x(end))';
-                n_sampling=length(x_sampling);
-                X_sampling=repmat(x_sampling,1,block_size);
-                int_temp=[int{i}{j} int{i}{j}(:,end)];
-                mask_temp=[mask{i}{j} mask{i}{j}(:,end)];
-                %could this loop could be optimized with parfor?
-                for k =1:block_size:length(tth_values)
-                    % take out a "block" of data. This limits the memory
-                    % consumption while retaining the benefits of vectorization.
-                    try
-                        tth_block=tth_values(k:(k+block_size-1));
-                    catch err   %#ok
-                        tth_block=tth_values(k:end);
-                        block_size=length(tth_block);
-                        X_sampling=repmat(x_sampling,1,block_size);
-                    end
-                    
-                    %determine the range needed to contain all curved paths
-                    Z_curve_test=curve_func(x_sampling,tth_block(1));
-                    Z_min=floor(min(Z_curve_test));
-                    Z_curve_test=curve_func(x_sampling,tth_block(end));
-                    Z_max=ceil(max(Z_curve_test));
-                    
-                    if Z_min<=0; Z_min=1; end
-                    
-                    z_block_ext=Z_min:Z_max;
-                    
-                    if verbose >2 
-                        fprintf('Block length: %.0f\n',length(z_block_ext))
-                    end
-                    % necessary to include the extra line because numerical errors
-                    % might make sampling values slightly too large
-                    
-                    int_block=int_temp(:,z_block_ext);
-                    mask_block=mask_temp(:,z_block_ext);
-                    
-                    % calculate the curved paths
-                    Z_curve=curve_func(X_sampling,repmat(tth_block,n_sampling,1));
-                    ind_keep=isreal(Z_curve);
-                    Z_curve(~ind_keep)=0;
-                    Z_curve=real(Z_curve);
-                    
-                    %get interpolated intensities along curved paths
-                    [Z_block, X_block]=meshgrid(z_block_ext, x);
-                    int_curve  =interp2(Z_block,X_block,int_block,...
-                        Z_curve,X_sampling,'linear',0);
-                    mask_curve =interp2(Z_block,X_block,mask_block,...
-                        Z_curve,X_sampling,'linear',0);
-%                     int_curve  =interp2(Z_block,X_block,int_block,...
-%                         Z_curve,X_sampling,'nearest',0);
-%                     mask_curve =interp2(Z_block,X_block,mask_block,...
-%                         Z_curve,X_sampling,'nearest',0);
-                    
-                    if sum(sum(isnan(mask_curve)))>0
-                        fprintf(['NaN found during integration of pixel'...
-                                 ' %.0f to %.0f\n'],k, k+block_size-1)
-                    end
-                    
-                    % calculate weights for integration
-                    switch settings.weighting_method
-                        case 'curve_length' 
-                            %this looks like method used in old-script
-                            dZ=diff(Z_curve,1);
-                            dr=sqrt((dZ*pixsize(2)).^2+(dx*pixsize(1)).^2); %mm
-                            %make symmetric around the point
-                            dra=(dr(2:end,:)+dr(1:end-1,:))/2; 
-                            %pad edges of matrix
-                            weight=[dra(1,:); dra; dra(end,:)];                             
-                        case 'area' %calculate the area of a parallelogram.
-                            dZ=diff(Z_curve,1,2);
-                            if size(dZ,2)~=1
-                                dZa=(dZ(:,2:end)+dZ(:,1:end-1))/2;
-                            else
-                                dZa=dZ; %very rare occurence
-                            end
-                            
-                            dA=abs((dZa.*pixsize(2)).*(dx.*pixsize(1)));  %dZa is the extra area
-                            weight=[dA(:,1) dA dA(:,end)]; %pad edges
-                            
-                        case 'unity'
-                            weight=ones(size(int_curve));
-                            
-                        otherwise
-                            error('Unknown weighting scheme')
-                    end
-                    
-                    %apply mask
-                    weight=weight.*mask_curve;
-                    % calculate integrated intensity
-                    mean_curve=sum(int_curve.*weight,1)./sum(weight,1);
-                    %the calculation of esd is problematic when the pixels 
-                    %are "over-sampled"
-                    if dx==1
-%                         esd_curve=sum(((repmat(mean_curve,n_sampling,1)-int_curve).*weight).^2,1)./(sum(weight,1)).^2;
-                        esd_curve=sum(((repmat(mean_curve,n_sampling,1)-int_curve).*mask_curve).^2,1)./(sum(mask_curve,1)).^2;
-                    else
-                        %oversampling for integration
-                        error('Do not know what to do, due to oversampling')
-                    end
-                    
-                    int_mean(k:(k+block_size-1))=mean_curve;
-                    int_esd(k:(k+block_size-1))=esd_curve;
-                end
-                
-            case 'tine'
-                %           x=[1:1:xpmax];  %defines pixels in x-direction
-                % for r=minz:1:zpmax;  %integration from chosen z and onwards
-                % u(r)=abs(r-bc(1,1)+cor)*pixsize/R*180/pi;     %u is equal to 2theta
-                % y=real(sqrt((r+cor-bc(1,1))^2-(x-bc(1,2)).^2)+bc(1,1)-cor);
-                % % The summation along the circular arc
-                % ds(1)=0;F(1)=0;
-                % for n=2:xpmax
-                %     F(1)=0;
-                %     m1=floor(y(n));
-                %     temp=y(n)-m1-0.5;
-                % if temp>0 f1=(data(m1,n)+data(m1,n-1))/2;
-                %    m2=m1+1; f2=(data(m2,n)+data(m2,n-1))/2;
-                %    F(n)=f1+(f2-f1)*temp;
-                % else f1=(data(m1,n)+data(m1,n-1))/2;
-                %      m2=m1-1;f2=(data(m2,n)+data(m2,n-1))/2;
-                %      F(n)=f1-(f2-f1)*temp;
-                % end
-                %     ds(n)=sqrt((y(n)-y(n-1))^2+1);
-                %     Ids(n)=ds(n)*F(n);
-                % end
-                %     pathds(r)=sum(ds);
-                %     Int(r)=sum(Ids);
-                %     Int_av(r)=sum(Ids)/(n-1); %Gennemsnit af int.
-                %     sig_st_af(r)=sqrt(sum((Ids-Int_av(r)).^2)/(n-2)); %n har n-1 elementer. -1 for at få standard afvigelsen
-                %     error_v(r)=sig_st_af(r)/sqrt(n-1);
-                %
-                % end
-                % pathsrel=pathds(end)./pathds; %weights acoording to path lenght
-                % Intr=Int.*pathsrel; %Intensity normalized to same solid angle
-                % %Intp=Intr./(con*(xpmax-1));  %converts intensity from IP to photons
-                % Intp=Intr./(con);  %converts intensity from IP to photons
-                % error=sqrt(Intp);
-                % error_vc=error_v./con.*pathsrel*(xpmax-1); %xpmax-1: fordi vi skal have for den integrerede int. ikke gennemsnittet
-                %
-        end
-        
-        int_data{i}{j}=[tth_values', int_mean', int_esd'];
-        
-        
-        if verbose > 1
-            
-            int_masked=int_temp;
-            int_masked(mask_temp==0)=0;
-            plot_and_analyse_2d(int_masked,settings, i,j);
-        end
+%coordination transformations
+[pix2tth, tth2pix, tth2mm, ...
+    x_pix2mm, x_mm2pix, ...
+    z_pix2mm, z_mm2pix ]=coordinate_transformations(ip_bc);  %#ok
+
+%The integration path as function of x and 2theta
+curve_func=get_curve_func(ip_bc,settings.integration_path);
+
+%setup the 2theta axis
+tth_step=pix2tth(2)-pix2tth(1);
+minz=1;
+tth_min=pix2tth(minz);
+if tth_min<0.01
+    tth_min=pix2tth(ceil(tth2pix(0.01))); %FIXLATER
+end
+tth_max=pix2tth(size(int,2));
+if tth_max > 90
+disp('WARNING: The maximum 2theta angle of your detector is calculated to be larger than 90 degrees. Make sure that your pixel size is set correctly')
+end
+tth_values=tth_min:tth_step:tth_max;
+
+nx=size(int,1);
+x=1:nx;
+
+%initiate variables for integrated result
+int_mean=zeros(size(tth_values));
+int_esd=zeros(size(tth_values));
+
+if verbose > 0
+    fprintf('Starting curve integration\n')
+end
+block_size=3000;
+dx=1;
+x_sampling=(x(1):dx:x(end))';
+n_sampling=length(x_sampling);
+X_sampling=repmat(x_sampling,1,block_size);
+int_temp=[int int(:,end)];
+mask_temp=[mask mask(:,end)];
+%could this loop could be optimized with parfor?
+for k =1:block_size:length(tth_values)
+    % take out a "block" of data. This limits the memory
+    % consumption while retaining the benefits of vectorization.
+    try
+        tth_block=tth_values(k:(k+block_size-1));
+    catch err   %#ok
+        tth_block=tth_values(k:end);
+        block_size=length(tth_block);
+        X_sampling=repmat(x_sampling,1,block_size);
     end
+    
+    %determine the range needed to contain all curved paths
+    Z_curve_test=curve_func(x_sampling,tth_block(1));
+    Z_min=floor(min(Z_curve_test));
+    Z_curve_test=curve_func(x_sampling,tth_block(end));
+    Z_max=ceil(max(Z_curve_test));
+    
+    if Z_min<=0; Z_min=1; end
+    
+    z_block_ext=Z_min:Z_max;
+    
+    if verbose >2
+        fprintf('Block length: %.0f\n',length(z_block_ext))
+    end
+    % necessary to include the extra line because numerical errors
+    % might make sampling values slightly too large
+    
+    int_block=int_temp(:,z_block_ext);
+    mask_block=mask_temp(:,z_block_ext);
+    
+    % calculate the curved paths
+    Z_curve=curve_func(X_sampling,repmat(tth_block,n_sampling,1));
+    ind_keep=isreal(Z_curve);
+    Z_curve(~ind_keep)=0;
+    Z_curve=real(Z_curve);
+    
+    %get interpolated intensities along curved paths
+    [Z_block, X_block]=meshgrid(z_block_ext, x);
+    int_curve  =interp2(Z_block,X_block,int_block,...
+        Z_curve,X_sampling,'linear',0);
+    mask_curve =interp2(Z_block,X_block,mask_block,...
+        Z_curve,X_sampling,'linear',0);
+    
+    if sum(sum(isnan(mask_curve)))>0
+        fprintf(['NaN found during integration of pixel'...
+            ' %.0f to %.0f\n'],k, k+block_size-1)
+    end
+    
+    % calculate weights for integration
+    switch settings.integration_weighting
+        case 'curve_length'
+            %this looks like method used in old-script
+            dZ=diff(Z_curve,1);
+            dr=sqrt((dZ*pixsize(2)).^2+(dx*pixsize(1)).^2); %mm
+            %make symmetric around the point
+            dra=(dr(2:end,:)+dr(1:end-1,:))/2;
+            %pad edges of matrix
+            weight=[dra(1,:); dra; dra(end,:)]*pixsize(2)/(pixsize(1)*pixsize(2));
+        case 'area' %calculate the area of a parallelogram.
+            dZ=diff(Z_curve,1,2);
+            if size(dZ,2)~=1
+                dZa=(dZ(:,2:end)+dZ(:,1:end-1))/2;
+            else
+                dZa=dZ; %very rare occurence
+            end
+            dA=abs((dZa*pixsize(1)*pixsize(2)));  %dZa is the extra area
+            weight=[dA(:,1) dA dA(:,end)]/(pixsize(1)*pixsize(2)); %pad edges
+        case 'unity'
+            weight=ones(size(int_curve));
+        otherwise
+            error('Unknown weighting scheme')
+    end
+%     Since "int" is number of photons per pixel (and not photons pr mm^2)
+%     is the weight normalized to area of one pixel. This is done so
+%     "total_curve" below is the total number of photons counted by the
+%     entire image plate.
+    
+    %apply mask
+    weight=weight.*mask_curve;
+    % calculate integrated intensity   
+    %Scale the integrated intensity to approximately "total photons
+    %counted" (instead of phontons per pixel)
+    scale_factor=1;
+    total_curve=sum(int_curve.*weight,1)*scale_factor;
+    normalization=sum(weight,1);
+    mean_curve=total_curve./normalization;
+    
+    switch settings.integration_esd
+        case 'empirical'
+            %the calculation of esd is problematic when the pixels
+            %are "over-sampled"
+            if dx==1
+                %calculate the variance of intensity along the integration path
+               var_curve=sum(((repmat(mean_curve,n_sampling,1)-int_curve)...
+                    .*mask_curve).^2,1)./(sum(mask_curve,1)).^2 ...
+                    *scale_factor;
+                %calculate standard deviation
+                esd_curve=sqrt(var_curve);
+            else
+                %oversampling for integration
+                error('Do not know what to do, due to oversampling')
+            end
+        case 'poisson'
+            %requires that mean_curve is the total number of photons
+            %counted on absolute scale
+            
+            var_curve=total_curve;
+            esd_curve=sqrt(var_curve)./normalization;
+    end
+    int_mean(k:(k+block_size-1))=mean_curve;
+    int_esd(k:(k+block_size-1))=esd_curve;
 end
 
+%Prepare the result for output
+int_data=[tth_values', int_mean', int_esd'];
 
 end
 
-function [cf, cf_bc]=get_curve_func(bc,path_shape)
+function [cf, cf_bc]=get_curve_func(bc,integration_path)
 global R pixsize
 
 
 
 [pix2tth, tth2pix, tth2mm, ...
- x_pix2mm, x_mm2pix,...
- z_pix2mm, z_mm2pix ]=coordinate_transformations(bc); %#ok
+    x_pix2mm, x_mm2pix,...
+    z_pix2mm, z_mm2pix ]=coordinate_transformations(bc); %#ok
 
-switch path_shape
+switch integration_path
     case 'line'
         cf=@(x_pix,tth) ones(size(x_pix)).*tth2pix(tth);
         cf_bc=@(x_pix,tth,bc) ones(size(x_pix)).*tth2pix(tth);
@@ -2755,11 +2766,11 @@ switch path_shape
         z_mm = @(x_mm,tth) R/180*pi.*atand(tand(tth).*cosd(abs(asind(-x_mm./sind(tth)./r(x_mm)))));
         cf= @(x_pix,tth) z_mm2pix(z_mm(x_pix2mm(x_pix), tth)); %pixel
         
-       %CHECK THAT THIS IS CORRECT. PIXELSIZE IN X AND Z DIRECTION
+        %CHECK THAT THIS IS CORRECT. PIXELSIZE IN X AND Z DIRECTION
         r_pix  = @(x_pix) sqrt(R.^2 + (x_pix.*pixsize(1)).^2)./pixsize(1); % pix
         cf_bc = @(x_pix,tth,bc) R/180*pi/pixsize(2).*atand(tand(tth).*cosd(abs(asind(-(x_pix-bc(1))./(sind(tth).*r_pix(x_pix-bc(1)))))))+bc(2);
     otherwise
-        error('Unknown name for path_shape')
+        error('Unknown name for integration_path')
 end
 end
 
@@ -2789,12 +2800,12 @@ end
 function plot_and_analyse_2d(int_mask,settings,file_number,ip_number)
 global dfs
 
-ip_bc=settings.image_plate_beam_center{file_number}(ip_number,:);
+ip_bc=settings.ip_beam_center{file_number}(ip_number,:);
 % origin=settings.image_plate_origin{file_number}(ip_number,:);
 
 pix2tth=coordinate_transformations(ip_bc);
 x_sampling=1:size(int_mask,1);
-curve_func=get_curve_func(ip_bc,settings.path_shape);
+curve_func=get_curve_func(ip_bc,settings.integration_path);
 
 fig=figure('Outerposition',[ 0  50   dfs],...
     'Name',sprintf('Scan file no. %.0f - Image plate no. %.0f',...
@@ -2806,9 +2817,9 @@ tab1 = uitab('Parent', tgroup, 'Title', '2D data');
 tab2 = uitab('Parent', tgroup, 'Title', 'Fit results');
 
 ax_pix = axes('Parent',tab1,...
-              'units','normalized',...
-              'position',[0.1 0.17 0.85 0.75 ],...
-              'fontsize',12);
+    'units','normalized',...
+    'position',[0.1 0.17 0.85 0.75 ],...
+    'fontsize',12);
 imagesc(log10(int_mask));
 
 set(ax_pix,'YDir','normal',...
@@ -2864,15 +2875,15 @@ clim_values=get(ax_pix,'Clim');
 set(h_clim_min,'string',num2str(clim_values(1)));
 set(h_clim_max,'string',num2str(clim_values(2)));
 
-% Create the column and row names in cell arrays 
+% Create the column and row names in cell arrays
 cnames = {'2theta','X_BC',...
-          'fit-2theta','esd',...
-          'fit-X_BC','esd'};
+    'fit-2theta','esd',...
+    'fit-X_BC','esd'};
 % fit_data=zeros(1,8);
 fit_data=[];
 fit_table = uitable(tab2,'Data',fit_data,'ColumnWidth',{75},...
     'ColumnName',cnames,...
-    'columnformat',{'short','short','short','short','short','short',},... 
+    'columnformat',{'short','short','short','short','short','short',},...
     'units','normalized','position',[0.1 0.15 0.85 0.80 ]);
 
 set( gcf, 'toolbar', 'figure' )
@@ -2890,8 +2901,8 @@ disp('')
     function fit_path(~,~)
         global R pixsize
         
-%         [~, cf_bc]=get_curve_func(ip_bc,'circle');
-        [~, cf_bc]=get_curve_func(ip_bc,settings.path_shape);
+        %         [~, cf_bc]=get_curve_func(ip_bc,'circle');
+        [~, cf_bc]=get_curve_func(ip_bc,settings.integration_path);
         cf_fit=@(p,x) cf_bc(x,p(1),[p(2) ip_bc(2)]);
         
         if ~do_not_show_again
@@ -2928,7 +2939,7 @@ disp('')
             if zlimit(i,2)>size(int_mask,2); zlimit(i,2)=size(int_mask,2); end
             zselect(i,:)=zlimit(i,1):zlimit(i,2);
         end
-
+        
         
         d2=20;
         z1=zeros(size(int_mask,1),d2*2+1);
@@ -2937,14 +2948,14 @@ disp('')
         for k=1:size(int_mask,1);
             [~,peak_index_i]=max(int_mask(k,zselect(k,:)),[],2);
             z_peak(k)=peak_index_i+zselect(k,1);
-        
+            
             z1(k,:)=z_peak(k)-d2:z_peak(k)+d2;
             int_z1(k,:)=int_mask(k,z1(k,:));
         end
         
         z_norm=sum(int_z1,2);
         z_m1=sum(int_z1.*z1,2)./z_norm;
-
+        
         tth_guess=(z_m1(round(ip_bc(1)))-ip_bc(2))*pixsize(2)/R*180/pi;
         
         ind=~isnan(z_m1);
@@ -2959,7 +2970,7 @@ disp('')
         z_m1=z_m1(~ind_outside);
         z_peak=z_peak(~ind_outside);
         
-
+        
         
         p_guess=[tth_guess ip_bc(1)];
         [p_fit,p_esd, ~]=fit_path_center(x1,z_m1,cf_fit,p_guess);
@@ -2972,7 +2983,7 @@ disp('')
             p_fit(2),p_esd(2),p_fit(1),p_esd(1));
         
         fit_data(end+1,:)=[tth_guess, ip_bc(1) , p_fit(1),p_esd(1),...
-                           p_fit(2),p_esd(2)];
+            p_fit(2),p_esd(2)];
         set(fit_table,'Data',fit_data)
         
         ttl(end+1)=plot(z_peak,x1,'.r','linewidth',1);
@@ -2982,13 +2993,13 @@ disp('')
         z0_curve=cf_fit(p_guess,x_sampling);
         ttl(end+1)=plot(z0_curve,x_sampling,...
             '-','color',[0 0 0],'linewidth',1);
-
+        
         z0_curve=cf_fit(p_fit,x_sampling);
         ttl(end+1)=plot(z0_curve,x_sampling,...
             '-','color',[1 0.1 0.1],'linewidth',1);
         
         legend(ttl(end-3:end),'max value','1^{st} moment', ...
-                              'Initial','Fefined')
+            'Initial','Fefined')
         
     end
 
@@ -3008,8 +3019,8 @@ disp('')
             [p_fit,resnorm,resid,~,~,~,J]=lsqcurvefit(z_pix_circle,p0,xi,zi,...
                 p_lower,p_upper,options);
         end
-
-
+        
+        
         p_conf = nlparci(p_fit,resid,'jacobian',J);
         degrees_of_freedom=length(zi)-length(p0)-1;   %CHECK LATER is it correct
         esd=conf2esd(p_conf,degrees_of_freedom);
@@ -3145,7 +3156,7 @@ r4=sum(int_radial_nobg.*(R_sampling-R1).^4,1)./norm_factor_radial;
 r5=sum(int_radial_nobg.*(R_sampling-R1).^5,1)./norm_factor_radial;
 r7=sum(int_radial_nobg.*(R_sampling-R1).^7,1)./norm_factor_radial;
 % The third moment measures skewness, the lack of symmetry, while the
-% fourth moment measures kurtosis, the degree to which the 
+% fourth moment measures kurtosis, the degree to which the
 % distribution is peaked
 s_r=sqrt(r2);
 skewness_r=r3./s_r.^3;
@@ -3239,8 +3250,8 @@ hold on
 
 h(1 ,2)=plot(alpha_sampling,norm_factor_radial,'b');
 h(2 ,2)=plot(alpha_sampling,z1-ip_bc(2),'r');  %subtract the bc to make the
-                                               % plot comparable to r1
-                                               % plotted in h(2,1)
+% plot comparable to r1
+% plotted in h(2,1)
 h(3 ,2)=plot(alpha_sampling,wz(:,1),'b');
 h(4 ,2)=plot(alpha_sampling,wz(:,3),'b');
 h(5 ,2)=plot(alpha_sampling,wz(:,5),'b');
@@ -3309,8 +3320,8 @@ end
 function save_integrated_data(data,settings,auto_mode)
 number_of_data_files=length(data);
 
-%make a "standard output filename" 
-[path,name,~]=fileparts(settings.filename{1});
+%make a "standard output filename"
+[path,name,~]=fileparts(settings.scan_filename{1});
 standard_output_file=[path '/' name '_int.dat'];
 
 if isempty(settings.save_result)
@@ -3364,7 +3375,7 @@ else
         %If there are more than one IP in total, each IP is given a bank
         %number which is increasing from low to high angle
         bank_number=0;
-        %Each data bank is saved as a separate file. The number of the 
+        %Each data bank is saved as a separate file. The number of the
         % data bank is added to
         % the filename
         output_file_name0=output_file_name;
@@ -3383,7 +3394,7 @@ else
                     ['_bank' num2str(bank_number) ext]);
                 fid=fopen(output_file_name,'w');
                 fprintf(fid,'%16s%16s%16s\r\n','2theta(degree)',...
-                            'intensity','esd');
+                    'intensity','esd');
                 fprintf(fid,'%16.5f%16.6f%16.6f\r\n',data{i}{j}');
                 fclose(fid);
             end
@@ -3419,7 +3430,7 @@ if auto_mode
             output_file_name=settings.save_settings;
     end
 else
-     [filename,path] = uiputfile('*.ini','Save file name');
+    [filename,path] = uiputfile('*.ini','Save file name');
     if isequal(filename,0)
         output_file_name=0;
     else
@@ -3438,18 +3449,18 @@ end
 
 end
 
-% 2 functions ascii2struct and struct2ascii. Convert between the MATLAB 
-% structure which contains all settings/parameters and an ascii. The ascii 
-% file is written as "keyword = blabla". blabla can be a string  
-% (optional to incase with '') of array of numbers of a cell array. An 
-% array and cell array are written as one would define them in Matlab. An 
+% 2 functions ascii2struct and struct2ascii. Convert between the MATLAB
+% structure which contains all settings/parameters and an ascii. The ascii
+% file is written as "keyword = blabla". blabla can be a string
+% (optional to incase with '') of array of numbers of a cell array. An
+% array and cell array are written as one would define them in Matlab. An
 % array of numbers does not need to be enclosed with [].
 
 function settings=ascii2struct(inputfile)
 fid=fopen(inputfile);
 if fid==-1
     error('Settings file (%s) not found',inputfile)
-end 
+end
 settings_str=fread(fid,'*char')';
 
 settings=[];
@@ -3458,8 +3469,8 @@ set=regexp(settings_str,'(^|\n)(?<!\%)\s*(\w+)\s*\=(.+?)($|[\r\n])','tokens');
 %Explanation for regexp expression:
 %(^|\n) beginning of string or newline: keyword must be at beginning of file
 %(?<!%) must not be preceded by %-sign: comments are ignored
-%\s*(\w+)\s*\= maybe some whitespaces, then a keyword, maybe some 
-%whitespace then followed by =-sign 
+%\s*(\w+)\s*\= maybe some whitespaces, then a keyword, maybe some
+%whitespace then followed by =-sign
 
 for i=  1:length(set)
     field_name= set{i}{2};
@@ -3574,7 +3585,7 @@ fclose(fid);
     end
 end
 
-%% Small helper functions 
+%% Small helper functions
 function esd=conf2esd(con,degrees_of_freedom)
 width=abs(con(:,2)-con(:,1));
 if nargin~=2
@@ -3622,7 +3633,7 @@ xrf=(y0-yn(1))/(yn(2)-yn(1))*(xn(2)-xn(1))+xn(1);
 FW=xrf-xlf;
 
 asym=((cog-xrf)-(xlf-cog))./FW; %approaches 0 for the symmetric peak
-        
+
 
 end
 
@@ -3662,22 +3673,22 @@ end
 end
 
 function [t, xt1]=vector_lines_intersect(x1,r1,x2,r2)
-        %line is defined by a point x1 and a direction r1
-        % x(t)=x1+r1*t
-        %this function returns the intersection between the two points
-        %ensure all input are columns
-        x1=x1(:); r1=r1(:);
-        x2=x2(:); r2=r2(:);
-        
-        % Setup as a matrix equation Y=A*t
-        Y=x2-x1;       
-        A=[r1 -r2];
-        %solve for t
-        t=A\Y;
-        
-        %calculate the coordinates.  
-        xt1=x1+r1*t(1);
-        % xt2=x2+r2*t(2); %xt1 and xt2 should of course be identical
+%line is defined by a point x1 and a direction r1
+% x(t)=x1+r1*t
+%this function returns the intersection between the two points
+%ensure all input are columns
+x1=x1(:); r1=r1(:);
+x2=x2(:); r2=r2(:);
+
+% Setup as a matrix equation Y=A*t
+Y=x2-x1;
+A=[r1 -r2];
+%solve for t
+t=A\Y;
+
+%calculate the coordinates.
+xt1=x1+r1*t(1);
+% xt2=x2+r2*t(2); %xt1 and xt2 should of course be identical
 end
 
 function [x0,z0]=get_bottom_right_corner(x,z)
